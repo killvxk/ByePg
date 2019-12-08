@@ -39,6 +39,7 @@ static constexpr ULONG KPRCB_ProcessorIndex = 0x24;
 
 static ULONG KPRCB_IpiFrozen = 0;
 static ULONG KPRCB_Context = 0;
+static ULONG KPCR_DebuggerSavedIRQL = 0;
 static volatile LONG* KiHardwareTrigger = nullptr;
 static volatile LONG* KiFreezeExecutionLock = nullptr;
 static UCHAR* KeBugCheck2 = nullptr;
@@ -54,7 +55,7 @@ namespace Internals
 	{
 		// Fetch routine addresses
 		KeBugCheckExPtr = ResolveExport( L"KeBugCheckEx" );
-		KeBugCheckPtr = ResolveExport( L"KeBugCheckEx" );
+		KeBugCheckPtr = ResolveExport( L"KeBugCheck" );
 	
 		// Find offsetof(_KPRCB, Context)
 		UCHAR* It = KeBugCheckExPtr;
@@ -70,6 +71,17 @@ namespace Internals
 			}
 		}
 		if ( !KPRCB_Context ) return false;
+
+		// Find offsetof(_KPCR, Pcrb.DebuggerSavedIrql)
+		while ( ++It < ( KeBugCheckExPtr + 0x200 ) )
+		{
+			if ( !memcmp( It, "\x65\x88\x04", 3 ) )	// mov gs:imm32, r8l
+			{
+				KPCR_DebuggerSavedIRQL = *( ULONG* ) ( It + 4 );
+				break;
+			}
+		}
+		if ( !KPCR_DebuggerSavedIRQL ) return false;
 
 		// Find KiHardwareTrigger
 		while ( ++It < ( KeBugCheckExPtr + 0x200 ) )

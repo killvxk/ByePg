@@ -8,23 +8,40 @@ namespace BugCheck
 	static CONTEXT* FindContext( ULONG64 Rsp )
 	{
 		constexpr LONG ContextAlignment = __alignof( CONTEXT );
+		Rsp += ContextAlignment - 1;
 		Rsp &= ~( ContextAlignment - 1 );
+		Rsp -= ContextAlignment;
 
 		CONTEXT* ContextRecord;
-		while ( ContextRecord = ( CONTEXT* ) Rsp )
+		while ( ContextRecord = ( CONTEXT* ) ( Rsp += ContextAlignment ) )
 		{
-			if ( ( ContextRecord->ContextFlags == 0x10005F || ContextRecord->ContextFlags == 0x10001F ) &&
-				 ContextRecord->SegCs == 0x0010 &&
-				 ContextRecord->SegDs == 0x002B &&
+			// Assert address is valid
+			//
+			if ( KeGetCurrentIrql() <= DISPATCH_LEVEL )
+			{
+				if ( !MmIsAddressValid( ContextRecord ) )
+					return nullptr;
+			}
+
+			// Check for valid ContextFlags
+			//
+			if ( ContextRecord->ContextFlags != 0x10005F &&
+				 ContextRecord->ContextFlags != 0x10001F ) 
+				continue;
+
+			// Check for valid code segment
+			//
+			if ( ContextRecord->SegCs != 0x0010 ) 
+				continue;
+
+			// Return if all segments are saved
+			//
+			if ( ContextRecord->SegDs == 0x002B &&
 				 ContextRecord->SegEs == 0x002B &&
 				 ContextRecord->SegFs == 0x0053 &&
 				 ContextRecord->SegGs == 0x002B )
-			{
-				break;
-			}
-			Rsp += ContextAlignment;
+				return ContextRecord;
 		}
-		return ContextRecord;
 	}
 
 	// Extracts CONTEXT of the interrupted routine and an EXCEPTION_RECORD 
@@ -34,6 +51,7 @@ namespace BugCheck
 	{
 		// Get bugcheck parameters
 		ULONG BugCheckCode = BugCheckCtx->Rcx;
+
 		ULONG64 BugCheckArgs[] = 
 		{
 			BugCheckCtx->Rdx,
@@ -54,7 +72,6 @@ namespace BugCheck
 			case KERNEL_SECURITY_CHECK_FAILURE:
 			case UNEXPECTED_KERNEL_MODE_TRAP:
 				ExceptionCode = ( BugCheckArgs[ 0 ] << 32 ) | BugCheckCode;
-
 				// No context formed, read from trap frame, can ignore exception frame 
 				// as it should be the same as KeBugCheckEx caller context
 				//
@@ -80,12 +97,20 @@ namespace BugCheck
 				BugCheckCtx->EFlags = Tf->EFlags;
 				BugCheckCtx->MxCsr = Tf->MxCsr;
 				ContextRecord = BugCheckCtx;
+				ExceptionAddress = Tf->Rip;
 				break;
 			case SYSTEM_THREAD_EXCEPTION_NOT_HANDLED:
 				ExceptionCode = BugCheckArgs[ 0 ];
 				ExceptionAddress = BugCheckArgs[ 1 ];
 				ExceptionRecord = ( EXCEPTION_RECORD* ) BugCheckArgs[ 2 ];
 				ContextRecord = ( CONTEXT* ) BugCheckArgs[ 3 ];
+				break;
+			case INTERRUPT_EXCEPTION_NOT_HANDLED:
+			case INTERRUPT_UNWIND_ATTEMPTED:
+				ExceptionRecord = ( EXCEPTION_RECORD* ) BugCheckArgs[ 0 ];
+				ExceptionCode = ExceptionRecord->ExceptionCode;
+				ExceptionAddress = ( ULONG64 ) ExceptionRecord->ExceptionAddress;
+				ContextRecord = ( CONTEXT* ) BugCheckArgs[ 1 ];
 				break;
 			case SYSTEM_SERVICE_EXCEPTION:
 				ExceptionCode = BugCheckArgs[ 0 ];
@@ -103,7 +128,11 @@ namespace BugCheck
 
 		// Scan for context if no context pointer could be extracted
 		if ( !ContextRecord )
-			ContextRecord = FindContext( BugCheckCtx->Rsp );
+		{
+			// If still couldn't find:
+			if ( !( ContextRecord = FindContext( BugCheckCtx->Rsp ) ) )
+				__fastfail( 0 );
+		}
 
 		// Write context record pointer
 		*ContextRecordOut = ContextRecord;
@@ -111,7 +140,7 @@ namespace BugCheck
 		// Write exception record
 		if ( !ExceptionRecord )
 		{
-			RecordOut->ExceptionAddress = ( void* ) ( ExceptionAddress ? ExceptionAddress : ContextRecord->Rip );
+			RecordOut->ExceptionAddress = ( void* ) ExceptionAddress;
 			RecordOut->ExceptionCode = ExceptionCode;
 			RecordOut->ExceptionFlags = 0;
 			RecordOut->ExceptionRecord = nullptr;
